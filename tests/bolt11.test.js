@@ -12,7 +12,82 @@ const MOCK_PRIVATE_KEY = new Uint8Array(32).fill(1)
 const MOCK_PUB_KEY = secp256k1.getPublicKey(MOCK_PRIVATE_KEY, true)
 const MOCK_PUB_KEY_HEX = Array.from(MOCK_PUB_KEY).map(b => b.toString(16).padStart(2, '0')).join('')
 
+// Insert raw tagged words before the known fields, then let the independent
+// bolt11 library sign the complete payload. Our encoder cannot create unknowns.
+function invoiceWithRawTags (tagWords) {
+  const unsigned = bolt11.encode({
+    timestamp: 1496314658,
+    tags: [
+      { tagName: 'payment_hash', data: '00'.repeat(32) },
+      { tagName: 'description', data: 'raw tags' },
+      { tagName: 'payee_node_key', data: MOCK_PUB_KEY_HEX }
+    ]
+  }, false)
+  const { prefix, words } = bech32.decode(unsigned.wordsTemp, false)
+  unsigned.wordsTemp = bech32.encode(prefix, [...words.slice(0, 7), ...tagWords, ...words.slice(7)], false)
+  return bolt11.sign(unsigned, Buffer.from(MOCK_PRIVATE_KEY).toString('hex')).paymentRequest
+}
+
 describe('BOLT11 Tests', () => {
+  describe('Metadata and unknown tags', () => {
+    it('decodes the official payment metadata vector as hex', () => {
+      // https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
+      // "Please send 0.01 BTC with payment metadata 0x01fafaf0"
+      const invoice = 'lnbc10m1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdp9wpshjmt9de6zqmt9w3skgct5vysxjmnnd9jx2mq8q8a04uqsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygs9q2gqqqqqqsgq7hf8he7ecf7n4ffphs6awl9t6676rrclv9ckg3d3ncn7fct63p6s365duk5wrk202cfy3aj5xnnp5gs3vrdvruverwwq7yzhkf5a3xqpd05wjc'
+      const result = decode(invoice)
+      expect(result.success).toBe(true)
+      expect(result.data.tags.find(t => t.tagName === 'metadata')).toEqual({
+        tagName: 'metadata', data: '01fafaf0'
+      })
+    })
+
+    it.each(['', '00', '01fafaf0', '00ff'.repeat(32)])('round trips metadata %s', (metadata) => {
+      const signed = sign({
+        network: 'bitcoin',
+        timestamp: 1496314658,
+        tags: [
+          { tagName: 'payment_hash', data: '00'.repeat(32) },
+          { tagName: 'description', data: 'metadata' },
+          { tagName: 'metadata', data: metadata }
+        ]
+      }, MOCK_PRIVATE_KEY)
+      expect(signed.success).toBe(true)
+      const encoded = encode(signed.data)
+      expect(encoded.success).toBe(true)
+      const decoded = decode(encoded.data)
+      expect(decoded.success).toBe(true)
+      expect(decoded.data.tags.find(t => t.tagName === 'metadata').data).toBe(metadata)
+      const oracle = bolt11.decode(encoded.data)
+      const rawMetadata = oracle.tags.find(t => t.tagName === 'unknownTag' && t.data.tagCode === 27)
+      expect(bech32.decode(rawMetadata.data.words, false).words).toEqual(bech32.toWords(Buffer.from(metadata, 'hex')))
+      expect(oracle.payeeNodeKey).toBe(MOCK_PUB_KEY_HEX)
+    })
+
+    it.each([[], [31], [0, 31, 4], Array.from({ length: 40 }, (_, i) => i % 32)].map(words => [words]))(
+      'preserves unknown tag words %j without interpreting padding', (words) => {
+        const invoice = invoiceWithRawTags([2, words.length >> 5, words.length & 31, ...words])
+        const result = decode(invoice)
+        expect(result.success).toBe(true)
+        expect(result.data.tags[0]).toEqual({ tagName: 'unknown_2', data: words })
+        expect(result.data.tags[1]).toEqual({ tagName: 'payment_hash', data: '00'.repeat(32) })
+        expect(result.data.payeeNodeKey).toBe(MOCK_PUB_KEY_HEX)
+        const oracle = bolt11.decode(invoice).tags[0]
+        expect(oracle.data.tagCode).toBe(2)
+        expect(bech32.decode(oracle.data.words, false).words).toEqual(words)
+      }
+    )
+
+    it('preserves repeated unknown codes in invoice order', () => {
+      const result = decode(invoiceWithRawTags([2, 0, 1, 31, 31, 0, 0, 2, 0, 2, 0, 5]))
+      expect(result.success).toBe(true)
+      expect(result.data.tags.slice(0, 3)).toEqual([
+        { tagName: 'unknown_2', data: [31] },
+        { tagName: 'unknown_31', data: [] },
+        { tagName: 'unknown_2', data: [0, 5] }
+      ])
+    })
+  })
+
   describe('validateLightningInvoice', () => {
     const validLnbc = 'lnbc100u1p5m3k6fpp5uk9rs7fdrvssehzthphfjvpc3t5hyacgrveskwqzwclrdsl0cjgsdqydp5scqzzsxqrrssrzjqvgptfurj3528snx6e3dtwepafxw5fpzdymw9pj20jj09sunnqmwqqqqqyqqqqqqqqqqqqqqqqqqqqqqjqnp4qtem70et4qm86lv449zcpqjn9nmamd6qrzm3wa3d7msnq2kx3yapwsp50c4l2z72hcmejj88en6eu2p8u2ypv87pw5pndzjjtclwaw0f7wds9qyyssqtqeqrvaaw92y7at9463vxhwkjdy7lpxet7h6g4vry8xyw4ar9yn8qq36dryntpf252v58c4hrf4g59z2pr25lhp06n7x4z7yltd022cqk7lc7e'
 

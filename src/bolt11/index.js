@@ -19,12 +19,12 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { validateBitcoinAddress } from '../address-validation/bitcoin.js'
 
-/** @typedef {string | number | Uint8Array} TagData */
+/** @typedef {string | number | Uint8Array | number[]} TagData */
 
 /**
 * @typedef {object} Tag
-* @property {string} tagName - BOLT11 tag name (e.g. 'payment_hash', 'description')
-* @property {TagData} data - Decoded tag value
+* @property {string} tagName - BOLT11 tag name, or 'unknown_<code>' for unrecognized codes
+* @property {TagData} data - Decoded tag value; unknown tags retain raw 5-bit words as number[]
 */
 
 /**
@@ -88,6 +88,7 @@ const TAG_DEFS = [
   { char: 'p', code: 1, name: 'payment_hash', format: 'hex', length: 52 },
   { char: 's', code: 16, name: 'payment_secret', format: 'hex', length: 52 },
   { char: 'd', code: 13, name: 'description', format: 'string' },
+  { char: 'm', code: 27, name: 'metadata', format: 'hex' },
   { char: 'n', code: 19, name: 'payee_node_key', format: 'hex', length: 53 },
   { char: 'h', code: 23, name: 'purpose_commit_hash', format: 'hex', length: 52 },
   { char: 'x', code: 6, name: 'expiry', format: 'number' },
@@ -403,6 +404,8 @@ export function decode (invoice) {
           tagName: tagDef.name,
           data: parser(data, networkInfo)
         })
+      } else {
+        tags.push({ tagName: `unknown_${tagCode}`, data })
       }
 
       index += 3 + length
