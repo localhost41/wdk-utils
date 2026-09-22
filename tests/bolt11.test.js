@@ -13,7 +13,7 @@ const MOCK_PUB_KEY = secp256k1.getPublicKey(MOCK_PRIVATE_KEY, true)
 const MOCK_PUB_KEY_HEX = Array.from(MOCK_PUB_KEY).map(b => b.toString(16).padStart(2, '0')).join('')
 
 // Insert raw tagged words before the known fields, then let the independent
-// bolt11 library sign the complete payload. Our encoder cannot create unknowns.
+// bolt11 library sign the complete payload independently of our encoder.
 function invoiceWithRawTags (tagWords) {
   const unsigned = bolt11.encode({
     timestamp: 1496314658,
@@ -77,8 +77,65 @@ describe('BOLT11 Tests', () => {
       }
     )
 
+    it.each([[], [31], [0, 31, 4], Array.from({ length: 1023 }, (_, i) => i % 32)].map(words => [words.length, words]))(
+      're-encodes %i signed unknown words without changing the invoice', (_, words) => {
+        const invoice = invoiceWithRawTags([2, words.length >> 5, words.length & 31, ...words])
+        const decoded = decode(invoice)
+        expect(decoded.success).toBe(true)
+        expect(encode(decoded.data)).toEqual({ success: true, type: 'invoice', data: invoice })
+        const signed = sign(decoded.data, MOCK_PRIVATE_KEY)
+        expect(signed.success).toBe(true)
+        const encoded = encode(signed.data)
+        expect(encoded.success).toBe(true)
+        expect(decode(encoded.data).data.tags).toEqual(decoded.data.tags)
+      }
+    )
+
+    it.each([3600, 7200])('preserves an explicit expiry of %i when re-encoding unknown tags', (expiry) => {
+      const decoded = decode(invoiceWithRawTags([2, 0, 1, 31]))
+      decoded.data.tags.push({ tagName: 'expiry', data: expiry })
+      const signed = sign(decoded.data, MOCK_PRIVATE_KEY)
+      expect(signed.success).toBe(true)
+      const encoded = encode(signed.data)
+      expect(encoded.success).toBe(true)
+      const roundTrip = decode(encoded.data)
+      expect(roundTrip.success).toBe(true)
+      expect(roundTrip.data.tags.find(tag => tag.tagName === 'expiry').data).toBe(expiry)
+      expect(encode(roundTrip.data)).toEqual(encoded)
+    })
+
+    it.each(['unknown_-1', 'unknown_32', 'unknown_02', 'unknown_1', 'unknown_27', 'unrecognized'])(
+      'rejects invalid or known tag code aliases: %s', (tagName) => {
+        const decoded = decode(invoiceWithRawTags([2, 0, 1, 31]))
+        decoded.data.tags[0] = { tagName, data: [31] }
+        expect(encode(decoded.data)).toEqual({
+          success: false, reason: `ENCODE_TAG_FAILED: ${tagName} (UNKNOWN_TAG)`
+        })
+      }
+    )
+
+    it.each([[[-1]], [[32]], [[1.5]], [[NaN]], [['1']], [new Array(1)], ['1f'], [new Uint8Array([31])]])(
+      'rejects unknown payloads that are not arrays of 5-bit integers: %j', (data) => {
+        const decoded = decode(invoiceWithRawTags([2, 0, 1, 31]))
+        decoded.data.tags[0].data = data
+        expect(encode(decoded.data)).toEqual({
+          success: false, reason: 'ENCODE_TAG_FAILED: unknown_2 (INVALID_TAG_DATA)'
+        })
+      }
+    )
+
+    it('rejects unknown data exceeding the 10-bit length field', () => {
+      const decoded = decode(invoiceWithRawTags([2, 0, 1, 31]))
+      decoded.data.tags[0].data = Array(1024).fill(0)
+      expect(encode(decoded.data)).toEqual({
+        success: false, reason: 'ENCODE_TAG_FAILED: unknown_2 (TAG_DATA_TOO_LONG)'
+      })
+    })
+
     it('preserves repeated unknown codes in invoice order', () => {
-      const result = decode(invoiceWithRawTags([2, 0, 1, 31, 31, 0, 0, 2, 0, 2, 0, 5]))
+      const invoice = invoiceWithRawTags([2, 0, 1, 31, 31, 0, 0, 2, 0, 2, 0, 5])
+      const result = decode(invoice)
+      expect(encode(result.data)).toEqual({ success: true, type: 'invoice', data: invoice })
       expect(result.success).toBe(true)
       expect(result.data.tags.slice(0, 3)).toEqual([
         { tagName: 'unknown_2', data: [31] },
